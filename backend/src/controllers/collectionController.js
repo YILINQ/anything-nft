@@ -48,6 +48,60 @@ async function mock() {
     await saveAll([nft, buyer, seller])
 }
 
+
+async function transferOwnership(transactionDetails, recordTransaction = true) {
+    // get buyer/seller 
+    let buyer = await User.findOne({ address: transactionDetails.buyer });
+    let seller = await User.findOne({ address: transactionDetails.seller });
+
+    if (!buyer || !seller) {
+        return res.status(404).json({ error: "user not found" });
+    }
+
+    let collectionType = '';
+    if (transactionDetails.transaction_type === 'purchase-album') {
+        collectionType = 'album'
+    }
+    else if (transaction.transaction_type === 'purchase-nft') {
+        collectionType = 'nft'
+    }
+
+    // add/remove album from buyer/seller's prfoile
+    buyer[`${collectionType}_ids`].push(transactionDetails.collection_id);
+    const index = seller[`${collectionType}_ids`].indexOf(transactionDetails.collection_id);
+    if (index !== -1) {
+        seller[`${collectionType}_ids`].splice(index, 1);
+    }
+
+    // get collection and update collection's owner
+    let collection = null;
+    if (collectionType === 'album') {
+        collection = await Album.findOne({ album_id: transactionDetails.collection_id });
+        collection.owner = transactionDetails.buyer
+    }
+    else if (collectionType === 'nft') {
+        collection = await Bft.findOne({ nft_id: transactionDetails.collection_id });
+        collection.owner = [{ "address": transactionDetails.buyer, "percentage": 1 }];
+    }
+
+    // update collection's status
+    collection.status = "private";
+
+    // save document changes
+    let documents = [collection, buyer, seller];
+    if (recordTransaction) {
+        const transaction = new Transaction(transactionDetails);
+        documents.push(transaction)
+    }
+    await saveAll(documents)
+        .then(() => {
+            return;
+        })
+        .catch((error) => {
+            return res.status(422).json({ error: error.message });
+        });
+}
+
 async function purchaseNtf(req, res) {
     const body = req.body;
     if (!body) {
@@ -72,7 +126,7 @@ async function purchaseNtf(req, res) {
     }
 
     // create a transaction record
-    const transaction = new Transaction({
+    let transactionDetails = {
         buyer: body.buyer,
         seller: nft.owner[0].address,
         transaction_type: 'purchase-nft',
@@ -81,36 +135,29 @@ async function purchaseNtf(req, res) {
         commission: body.commission,
         commission_currency: body.commission_currency,
         collection_id: nft.nft_id
-    });
+    };
+    transferOwnership(transactionDetails);
 
-    let buyer = await User.findOne({ address: transaction.buyer });
-    let seller = await User.findOne({ address: transaction.seller });
-
-    if (!buyer || !seller) {
-        return res.status(404).json({ error: "user not found" });
-    }
-
-    // add/remove nft from buyer/seller's prfoile
-    buyer.nft_ids.push(transaction.collection_id);
-    const index = seller.nft_ids.indexOf(transaction.collection_id);
-    if (index !== -1) {
-        seller.nft_ids.splice(index, 1);
-    }
-
-    // update nft's information
-    nft.owner = [{ "address": transaction.buyer, "percentage": 1 }];
-    nft.status = "private";
-
-    //TODO: check if this nft fullfilled a album
-
-
-    await saveAll([nft, transaction, buyer, seller])
-        .then(() => {
-            return res.status(200).send();
+    //check if this nft fullfills a album
+    if (nft.album_id && nft.album_id !== '') {
+        let album = await Album.findOne({ album_id: nft.album_id });
+        const nft_owners = [];
+        await album.nft_ids.forEach(async (nft_d) => {
+            const nft = await Nft.findOne({ nft_id: body.nft_id });
+            const curr_nft_owners = nft.owner.map((element) => { return element.address; });
+            nft_owners = [...nft_owners, ...curr_nft_owners]
         })
-        .catch((error) => {
-            return res.status(422).json({ error: error.message });
-        });
+        if (nft_owners.length === album.nft_ids.length && Set(nft_owners).size === 1) {
+            const albumTransactionDetails = {
+                buyer: body.buyer,
+                seller: album.owner,
+                transaction_type: 'purchase-album',
+                collection_id: album.album_id
+            }
+            transferOwnership(albumTransactionDetails, false);
+        }
+    }
+    return res.status(200).send();
 };
 
 
@@ -147,7 +194,7 @@ async function purchaseAlbum(req, res) {
     }
 
     // create a transaction record
-    const transaction = new Transaction({
+    const transactionDetails = {
         buyer: body.buyer,
         seller: album.owner,
         transaction_type: 'purchase-album',
@@ -156,40 +203,21 @@ async function purchaseAlbum(req, res) {
         commission: body.commission,
         commission_currency: body.commission_currency,
         collection_id: album.album_id
-    });
-
-    // get buyer/seller 
-    let buyer = await User.findOne({ address: transaction.buyer });
-    let seller = await User.findOne({ address: transaction.seller });
-
-    if (!buyer || !seller) {
-        return res.status(404).json({ error: "user not found" });
-    }
-
-    // add/remove album from buyer/seller's prfoile
-    buyer.album_ids.push(transaction.collection_id);
-    const index = seller.album_ids.indexOf(transaction.collection_id);
-    if (index !== -1) {
-        seller.album_ids.splice(index, 1);
-    }
-
-    // update album's information
-    album.owner = transaction.buyer
-    album.status = "private";
+    };
+    transferOwnership(transactionDetails);
 
     //update associated nft's information
     nfts.forEach((nft) => {
-        nft.owner = [{ "address": transaction.buyer, "percentage": 1 }];
-        nft.status = "private";
+        const nftTransactionDetails = {
+            buyer: body.buyer,
+            seller: album.owner,
+            transaction_type: 'purchase-nft',
+            collection_id: nft.nft_id
+        }
+        transferOwnership(nftTransactionDetails, false);
     })
 
-    await saveAll([...nfts, transaction, buyer, seller])
-        .then(() => {
-            return res.status(200).send();
-        })
-        .catch((error) => {
-            return res.status(422).json({ error: error.message });
-        });
+    return res.status(200).send();
 };
 
 
